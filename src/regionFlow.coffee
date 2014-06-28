@@ -11,6 +11,18 @@
 # Initialize NamedFlowMap.
 # 
 class RegionFlow
+
+  # To be spec compliant, the NamedFlow .overset property should be proactively
+  # calculated after any layout change.
+  # 
+  # However, in reality, checking a DOM element's scrollHeight is very expensive,
+  # so it's best not to call it any more than is stricly necessary.
+  # 
+  # For that reason, lazy mode is enabled by default, and callers should call
+  # .updateOverset() on namedFlows instead of checking the .overset property.
+  # 
+  lazyMode: true
+
   init: ->
     document.namedFlows = new @NamedFlowMap
 
@@ -79,7 +91,7 @@ class RegionFlow::NamedFlow
   resetRegions: ->
     @regions = []
     @firstEmptyRegionIndex = -1
-    @updateOverset()
+    @updateOverset() unless RegionFlow::lazyMode
 
   # As specified:
   # 
@@ -140,7 +152,7 @@ class RegionFlow::NamedFlow
       # enter recursive loop
       @breakUp nodes: nodes
       
-    @updateOverset()
+    @updateOverset() unless RegionFlow::lazyMode
 
   # Place all content into regions. Performed only on first time.
   # 
@@ -164,8 +176,10 @@ class RegionFlow::NamedFlow
 
     nodes.each (index, childNode) =>
 
-      formerParent = $(childNode).parent()
+      if $(childNode).hasClass('break-before-always') and not $(targetNode).empty()
+        return false
 
+      formerParent = $(childNode).parent()
       $(childNode).remove().appendTo(targetNode)
 
       if @oversetRegion().updateOverset() is 'overset'
@@ -181,6 +195,9 @@ class RegionFlow::NamedFlow
         # exit loop
         return false
 
+      else if $(childNode).hasClass('break-after-always')
+        return false
+
   # Given a text node and a target node (in the overset region), find the number
   # of words which fit.
   # 
@@ -194,40 +211,35 @@ class RegionFlow::NamedFlow
     $(targetNode).appendTo(options.into)
 
     words = textNode.nodeValue.split(/[ ]+/)
-    breakIndex = words.length - 1
+    highIndex = words.length - 1
+    lowIndex = 0
+    tryIndex = highIndex
 
     loop
-      targetNode.textContent = words[0..breakIndex].join(" ")
+      targetNode.textContent = words[0..tryIndex].join(" ")
 
       if @oversetRegion().updateOverset() is 'overset'
-        
-        if breakIndex is 0
-          # not even a single word fits
-          breakIndex = -1
-          break
-        else
-          breakIndex = Math.floor(breakIndex / 2)
-
+        highIndex = tryIndex
       else
-        for tryIndex in [breakIndex+1..words.length-1]
-          targetNode.textContent += " #{words[tryIndex]}"
+        lowIndex = tryIndex
 
-          if @oversetRegion().updateOverset() is 'overset'
-            breakIndex = tryIndex - 1
-            break
-
-        break
+      tryIndex = Math.floor(lowIndex + (highIndex - lowIndex) / 2)
+      
+      break if highIndex - lowIndex <= 1
     
-    if breakIndex is -1
+    if tryIndex is 0
       $(targetNode).remove()
     else
-      targetNode.textContent = words[0..breakIndex].join(" ")
-      textNode.nodeValue = words[breakIndex+1..words.length-1].join(" ")
+      targetNode.textContent = words[0..tryIndex].join(" ")
+      textNode.nodeValue = words[tryIndex+1..words.length-1].join(" ")
       $(textNode).parent().addClass("region-flow-post-text-break")
 
-    @oversetRegion().updateOverset()
+    @oversetRegion().updateOverset() unless RegionFlow::lazyMode
 
+  # Calculate whether named flow is overset.
   # 
+  # Normally treated as a private method, but called publicly in lazy mode.
+  # See RegionFlow::lazyMode.
   # 
   updateOverset: ->
     @overset = @regions[@firstEmptyRegionIndex]?.updateOverset() is 'overset'
@@ -248,13 +260,13 @@ class RegionFlow::Region
 
   constructor: (node) ->
     @node = $(node)
-    @updateOverset()
+    @updateOverset() unless RegionFlow::lazyMode
 
   # Append one or more nodes.
   # 
   appendNode: (contentNode) ->
     $(@node).append(contentNode)
-    @updateOverset()
+    @updateOverset() unless RegionFlow::lazyMode
 
   # As specified:
   # 
@@ -269,10 +281,22 @@ class RegionFlow::Region
   updateOverset: ->
     node = @node.get(0)
     isOverset = node.scrollHeight > node.clientHeight
+
+    # Check if region contains a node which needs breaking
+    containsUnrespectedBreak = false
+    @node.find('.break-before-always').each ->
+      unless $(@).prev().length == 0
+        containsUnrespectedBreak = true
+        return
+    @node.find('.break-after-always').each ->
+      unless $(@).next().length == 0
+        containsUnrespectedBreak = true
+        return
+
     @regionOverset =
       if @node.is(':empty')
         'empty'
-      else if isOverset
+      else if isOverset or containsUnrespectedBreak
         'overset'
       else
         'fit'
